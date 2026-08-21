@@ -17,6 +17,7 @@
  */
 
 import type { Page, Locator, Frame } from 'playwright';
+import { NAV_TIMEOUT_MS } from './config';
 
 export interface RefEntry {
   locator: Locator;
@@ -191,7 +192,7 @@ export class TabSession {
     // Call setContent FIRST — only record the replay metadata after a successful load.
     // If setContent throws (timeout, crash), we must not leave phantom HTML that a
     // later viewport --scale would replay.
-    await this.page.setContent(html, { waitUntil, timeout: 15000 });
+    await this.page.setContent(html, { waitUntil, timeout: NAV_TIMEOUT_MS });
     this.loadedHtml = html;
     this.loadedHtmlWaitUntil = waitUntil;
   }

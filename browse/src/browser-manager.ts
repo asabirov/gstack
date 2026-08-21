@@ -25,6 +25,7 @@ import { resolveChromiumProfile, cleanSingletonLocks } from './config';
 import { launchWithXProtectHeal } from './xprotect-heal';
 import { withCdpSession } from './cdp-bridge';
 import type { MemorySnapshot, MemoryStructureStats, MemoryTabSnapshot, MemoryProcess } from './memory-snapshot';
+import { NAV_TIMEOUT_MS } from './config';
 
 /**
  * Detect whether GSTACK_CHROMIUM_PATH points at a custom Chromium build that
@@ -907,7 +908,7 @@ export class BrowserManager {
     this.wirePageEvents(page);
 
     if (normalizedUrl) {
-      await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
     }
 
     return id;
@@ -1505,7 +1506,7 @@ export class BrowserManager {
           console.warn(`[browse] Skipping invalid URL in state file: ${saved.url} — ${err.message}`);
           continue;
         }
-        await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
       }
 
       if (saved.storage) {
@@ -1762,7 +1763,7 @@ export class BrowserManager {
         viewport: null,
         ...(this.proxyConfig ? { proxy: this.proxyConfig } : {}),
         ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
-        timeout: 15000,
+        timeout: NAV_TIMEOUT_MS,
       }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

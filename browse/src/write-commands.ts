@@ -19,6 +19,7 @@ import { TEMP_DIR, isPathWithin } from './platform';
 import { SAFE_DIRECTORIES } from './path-security';
 import { modifyStyle, undoModification, resetModifications, getModificationHistory } from './cdp-inspector';
 import { withCdpSession } from './cdp-bridge';
+import { NAV_TIMEOUT_MS } from './config';
 
 /**
  * Aggressive page cleanup selectors and heuristics.
@@ -149,7 +150,7 @@ export async function handleWriteCommand(
       // must not leave stale content that could resurrect on a later context recreation.
       session.clearLoadedHtml();
       const normalizedUrl = await validateNavigationUrl(url);
-      const response = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      const response = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       const status = response?.status() || 'unknown';
       return `Navigated to ${normalizedUrl} (${status})`;
     }
@@ -157,21 +158,21 @@ export async function handleWriteCommand(
     case 'back': {
       if (inFrame) throw new Error('Cannot use back inside a frame. Run \'frame main\' first.');
       session.clearLoadedHtml();
-      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       return `Back → ${page.url()}`;
     }
 
     case 'forward': {
       if (inFrame) throw new Error('Cannot use forward inside a frame. Run \'frame main\' first.');
       session.clearLoadedHtml();
-      await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goForward({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       return `Forward → ${page.url()}`;
     }
 
     case 'reload': {
       if (inFrame) throw new Error('Cannot use reload inside a frame. Run \'frame main\' first.');
       session.clearLoadedHtml();
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       return `Reloaded ${page.url()}`;
     }
 

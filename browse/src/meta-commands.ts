@@ -22,6 +22,7 @@ import { TEMP_DIR } from './platform';
 import { resolveConfig } from './config';
 import { filterSessionCookies } from './session-persist';
 import type { Frame } from 'playwright';
+import { NAV_TIMEOUT_MS } from './config';
 
 /** Tokenize a pipe segment respecting double-quoted strings. */
 function tokenizePipeSegment(segment: string): string[] {
@@ -695,11 +696,11 @@ export async function handleMetaCommand(
 
       const page = bm.getPage();
       const normalizedUrl1 = await validateNavigationUrl(url1);
-      await page.goto(normalizedUrl1, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(normalizedUrl1, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       const text1 = await getCleanText(page);
 
       const normalizedUrl2 = await validateNavigationUrl(url2);
-      await page.goto(normalizedUrl2, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(normalizedUrl2, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       const text2 = await getCleanText(page);
 
       const changes = Diff.diffLines(text1, text2);

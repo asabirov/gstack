@@ -16,6 +16,17 @@ import * as path from 'path';
 import { mkdirSecure } from './file-permissions';
 import { safeUnlinkQuiet } from './error-handling';
 
+/**
+ * Navigation budget for goto / back / forward / reload / setContent.
+ *
+ * Was 15s, written at eight call sites. Auth-gated pages exceed that on a loaded machine,
+ * and the failure is not a clean error: the timeout leaves the page on `about:blank`, so
+ * the next `cookie-import-browser --domain X` refuses with "does not match current page
+ * domain", and every page after that loads unauthenticated — which on a private repo is
+ * indistinguishable from a 404. Override per run with GSTACK_NAV_TIMEOUT_MS.
+ */
+export const NAV_TIMEOUT_MS = Number(process.env.GSTACK_NAV_TIMEOUT_MS) || 45_000;
+
 export interface BrowseConfig {
   projectDir: string;
   stateDir: string;
