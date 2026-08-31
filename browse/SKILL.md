@@ -645,6 +645,14 @@ surprising):
   sessions, so `reload` or `screenshot` without a preceding `goto` can act on
   whatever page earlier work left open. Start verification passes with an
   explicit `$B goto <url>`, never a bare `reload`.
+- **"Across sessions" means across sessions in one git root.** The daemon is
+  found through `.gstack/browse.json` at the project root, so every session
+  under that root shares one daemon — and every *other* checkout gets its own.
+  Each daemon carries four `chrome-headless-shell` processes, so eight
+  worktrees browsing at once is eight daemons and thirty-two Chromes, which is
+  the design and not a leak. They are collected by `BROWSE_IDLE_TIMEOUT`
+  (default 30 min), which takes each daemon's Chromes down with it; `browse
+  stop` ends one now.
 
 ### 5. Find all clickable elements (including non-ARIA)
 ```bash
