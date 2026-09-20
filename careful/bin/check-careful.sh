@@ -15,25 +15,46 @@ INPUT=$(cat)
 # --- Dated measurement (JEV B1), added 2026-09-20 ---------------------------
 # Counts every verdict this hook reaches, with its outcome bucket, because the
 # Jev analysis estimates this site's volume rather than observing it.
-# REMOVE ON OR AFTER 2026-10-04: delete this block and the `_jev_b1` calls.
 #
-# Self-contained on purpose: it must work on the broken-install path above,
+# REMOVE ON OR AFTER 2026-10-04. Delete this block and the `_jev_b1` calls, and
+# delete the data it wrote: "${GSTACK_HOME:-${HOME:-/tmp}/.gstack}"/analytics/jev-b1-counts.jsonl
+#
+# Self-contained on purpose: it must work on the broken-install path below,
 # where hook-extract.sh was never sourced. Every value it writes is a fixed
 # literal from this file -- never command content -- so no JSON encoding is
 # needed and nothing sensitive is recorded.
 #
+# NOTHING HERE MAY SPAWN A PROCESS OR DEREFERENCE AN UNSET VARIABLE. This hook
+# runs before every Bash call while /careful is active, under `set -euo
+# pipefail`, and it is the FIRST code in the script to touch $HOME. A review
+# measured an earlier version at +110 ms per call from three subprocesses, and
+# found that with HOME unset it aborted the script at rc=1 -- which Claude Code
+# treats as a non-blocking error, so the command ran ungated. That is the exact
+# failure the comment below at "a partial install must degrade to an ASK, never
+# silence" exists to prevent. Hence: `${HOME:-/tmp}`, a builtin substring test
+# instead of `grep|head`, and printf's `%(...)T` instead of `date`.
+#
 # Counted only when the payload carries a session_id, which a real Claude Code
 # hook invocation always does and the test suite's synthetic payloads never do.
 # That is what keeps `bun test test/hook-scripts.test.ts` out of the numbers.
-# Observation only: output is discarded and the call can never fail the hook.
-_JEV_B1_SESSION=$(printf '%s' "${INPUT:-}" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[0-9a-zA-Z_-]*"' 2>/dev/null | head -1 || true)
+# Observation only: it can never change a verdict or an exit code.
 _jev_b1() {
-  [ -n "$_JEV_B1_SESSION" ] || return 0
-  _jb_dir="${GSTACK_HOME:-$HOME/.gstack}/analytics"
-  mkdir -p "$_jb_dir" 2>/dev/null || true
-  printf '{"m":"jev-b1","site":"careful.verdict","hour":"%s","outcome":"%s","kind":"%s","pattern":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%HZ)" "$1" "$2" "${3:-none}" \
+  case "${INPUT:-}" in *'"session_id"'*) ;; *) return 0 ;; esac
+  _jb_dir="${GSTACK_HOME:-${HOME:-/tmp}/.gstack}/analytics"
+  [ -d "$_jb_dir" ] || mkdir -p "$_jb_dir" 2>/dev/null || true
+  # UTC, to match every other writer in this measurement. printf's %()T formats in
+  # LOCAL time, so TZ is set around it and restored -- still zero subprocesses, where
+  # `date -u` was one. Caught by checking the output, not by reading the man page.
+  _jb_tz="${TZ-}"
+  export TZ=UTC0
+  printf -v _jb_hour '%(%Y-%m-%dT%HZ)T' -1 2>/dev/null || _jb_hour="unknown"
+  if [ -n "$_jb_tz" ]; then export TZ="$_jb_tz"; else unset TZ; fi
+  # `n` is on every record so an aggregator can sum one field across every
+  # writer in this measurement, whether or not that writer batches.
+  printf '{"m":"jev-b1","site":"careful.verdict","hour":"%s","outcome":"%s","kind":"%s","pattern":"%s","n":1}\n' \
+    "$_jb_hour" "$1" "$2" "${3:-none}" \
     >> "$_jb_dir/jev-b1-counts.jsonl" 2>/dev/null || true
+  return 0
 }
 # --- end dated measurement --------------------------------------------------
 
