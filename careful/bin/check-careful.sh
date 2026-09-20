@@ -12,6 +12,32 @@ set -euo pipefail
 # Read stdin (JSON with tool_input)
 INPUT=$(cat)
 
+# --- Dated measurement (JEV B1), added 2026-09-20 ---------------------------
+# Counts every verdict this hook reaches, with its outcome bucket, because the
+# Jev analysis estimates this site's volume rather than observing it.
+# REMOVE ON OR AFTER 2026-10-04: delete this block and the `_jev_b1` calls.
+#
+# Self-contained on purpose: it must work on the broken-install path above,
+# where hook-extract.sh was never sourced. Every value it writes is a fixed
+# literal from this file -- never command content -- so no JSON encoding is
+# needed and nothing sensitive is recorded.
+#
+# Counted only when the payload carries a session_id, which a real Claude Code
+# hook invocation always does and the test suite's synthetic payloads never do.
+# That is what keeps `bun test test/hook-scripts.test.ts` out of the numbers.
+# Observation only: output is discarded and the call can never fail the hook.
+_JEV_B1_SESSION=$(printf '%s' "${INPUT:-}" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[0-9a-zA-Z_-]*"' 2>/dev/null | head -1 || true)
+_jev_b1() {
+  [ -n "$_JEV_B1_SESSION" ] || return 0
+  _jb_dir="${GSTACK_HOME:-$HOME/.gstack}/analytics"
+  mkdir -p "$_jb_dir" 2>/dev/null || true
+  printf '{"m":"jev-b1","site":"careful.verdict","hour":"%s","outcome":"%s","kind":"%s","pattern":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%HZ)" "$1" "$2" "${3:-none}" \
+    >> "$_jb_dir/jev-b1-counts.jsonl" 2>/dev/null || true
+}
+# --- end dated measurement --------------------------------------------------
+
+
 # Shared JSON helpers (extractor + encoder) — one copy for careful AND freeze.
 # See hook-extract.sh for the drift history that motivated the shared file.
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +46,7 @@ _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # install must degrade to an ASK (this is the ask-tier hook), never silence.
 _HOOK_HELPER="$_HOOK_DIR/hook-extract.sh"
 if [ ! -f "$_HOOK_HELPER" ] || ! . "$_HOOK_HELPER" 2>/dev/null; then
+  _jev_b1 ask default broken_install
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[careful] Hook helpers unavailable (broken install?) - cannot safety-check this command. Approve only if you know what it does."}}\n'
   exit 0
 fi
@@ -46,12 +73,14 @@ set -e
 
 # No parser available, or the payload is not parseable JSON. Fail closed.
 if [ "$EXTRACT_RC" -ne 0 ] && [ -n "$INPUT" ]; then
+  _jev_b1 ask default unparseable_payload
   gstack_hook_decision ask "[careful] Could not parse the tool payload to safety-check this command. Approve only if you know what it does."
   exit 0
 fi
 
 # Parsed fine, but there is genuinely no command field (non-Bash payload) — allow.
 if [ -z "$CMD" ]; then
+  _jev_b1 not_a_command default no_command_field
   echo '{}'
   exit 0
 fi
@@ -76,6 +105,7 @@ CMD_LOWER=$(printf '%s' "$CMD" | tr '[:upper:]' '[:lower:]')
 # primitives as a reason to ask: they are vanishingly rare in commands a human
 # actually means to run unattended.
 if printf '%s' "$CMD" | grep -qE '\$\{IFS\}|\$IFS|\$\(echo[^)]*base64[^)]*\)|base64[[:space:]]+(-d|--decode)[^|]*\|[[:space:]]*(sh|bash)' 2>/dev/null; then
+  _jev_b1 ask label obfuscation
   gstack_hook_decision ask "[careful] Shell obfuscation detected (IFS word-splitting or base64-to-shell). Read the command carefully before approving."
   exit 0
 fi
@@ -117,6 +147,7 @@ if [ "$_IS_SIMPLE" -eq 1 ]; then
     set +f
     if [ "$_ROOT_TARGETS" -eq 1 ] && [ "$_SAFE_TARGETS" -eq 0 ]; then
       _careful_log_fire "high_rm_root"
+      _jev_b1 deny label high_rm_root
       gstack_hook_decision deny "[careful][HIGH] Recursive delete of / or the home directory is blocked while /careful is active. If you truly mean it, end the /careful session first."
       exit 0
     fi
@@ -170,6 +201,7 @@ if [ "$_IS_SIMPLE" -eq 1 ]; then
         fi
         if [ "$_TARGETS_DEFAULT" -eq 1 ]; then
           _careful_log_fire "high_force_push_default"
+          _jev_b1 deny label high_force_push_default
           gstack_hook_decision deny "[careful][HIGH] Force-push to the default branch ($_DEFAULT_BRANCH) is blocked while /careful is active. Use --force-with-lease on a feature branch, or end the /careful session if you truly mean it."
           exit 0
         fi
@@ -199,6 +231,7 @@ case "$CMD" in
   *$'\n'*) : ;; # multi-line: fall through to the destructive checks
   *)
     if printf '%s' "$CMD" | grep -qE '^[[:space:]]*rm[[:space:]]+(-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]+|--recursive[[:space:]]+)(([^[:space:];&|#(`]*/)?(node_modules|\.next|dist|__pycache__|\.cache|build|\.turbo|coverage)[[:space:]]*)+$' 2>/dev/null; then
+      _jev_b1 allow label build_artifact_exception
       echo '{}'
       exit 0
     fi
@@ -300,7 +333,11 @@ fi
 # --- Output ---
 if [ -n "$WARN" ]; then
   _careful_log_fire "$PATTERN"
+  _jev_b1 ask label "$PATTERN"
   gstack_hook_decision ask "[careful] $WARN"
 else
+  # No family matched. This is the default bucket, and its share is the
+  # measure of how much traffic the destructive-command heuristic passes over.
+  _jev_b1 allow default no_match
   echo '{}'
 fi

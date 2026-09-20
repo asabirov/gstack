@@ -357,6 +357,8 @@ export function isNumberedOptionListVisible(visible: string): boolean {
 
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+// JEV B1 dated measurement -- remove on or after 2026-10-04, see jev-b1-counter.ts
+import { countDecision } from './jev-b1-counter';
 
 export interface PtyStateVerdict {
   state: 'waiting' | 'working' | 'hung' | 'unknown';
@@ -1816,6 +1818,9 @@ export async function runPlanSkillObservation(opts: {
         strictPlanWrites: !!opts.initialPlanContent,
       });
       if (classified) {
+        // JEV B1: the regex stage decided. Its share against pty-state.llm
+        // below is the measured miss rate of the regex detectors.
+        countDecision('pty-state.regex', classified.outcome, 'label');
         const obs: PlanSkillObservation = {
           ...classified,
           evidence: visible.slice(-2000),
@@ -1844,6 +1849,9 @@ export async function runPlanSkillObservation(opts: {
         lastJudgeAt = Date.now();
         logPtySnapshot(visible, { testName: opts.skillName, elapsedMs: elapsed, tag: 'judge-tick' });
         lastJudgeVerdict = judgePtyState(visible, { testName: opts.skillName });
+        // JEV B1: reaching the judge at all IS the regex fall-through.
+        countDecision('pty-state.llm', lastJudgeVerdict.state,
+          lastJudgeVerdict.state === 'unknown' ? 'unknown' : 'label');
         if (lastJudgeVerdict.state === 'waiting') {
           waitingEverObserved = true;
           return {
@@ -2329,6 +2337,8 @@ export async function runPlanSkillFloorCheck(opts: {
         !isPermissionDialogVisible(tail) &&
         !gateIsActiveRender
       ) {
+        // JEV B1: the floor check's own regex stage decided.
+        countDecision('pty-state.regex', 'auq_observed', 'label');
         return {
           auqObserved: true,
           outcome: 'auq_observed',
@@ -2349,6 +2359,9 @@ export async function runPlanSkillFloorCheck(opts: {
         lastJudgeAt = Date.now();
         logPtySnapshot(visible, { testName: opts.skillName, elapsedMs: elapsed, tag: 'floor-judge-tick' });
         lastJudgeVerdict = judgePtyState(visible, { testName: opts.skillName });
+        // JEV B1: reaching the judge at all IS the regex fall-through.
+        countDecision('pty-state.llm', lastJudgeVerdict.state,
+          lastJudgeVerdict.state === 'unknown' ? 'unknown' : 'label');
         // The judge can't tell a scope-gate question from a finding question,
         // so a 'waiting' verdict while the gate menu is the pending render
         // must NOT satisfy the floor — same active-render exclusion as the
