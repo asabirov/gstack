@@ -31,8 +31,19 @@ if [ ! -f "$_HOOK_HELPER" ] || ! . "$_HOOK_HELPER" 2>/dev/null; then
   exit 0
 fi
 
-# Locate the freeze directory state file
-STATE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.gstack}"
+# Locate the freeze directory state file. The shared helper resolves the state
+# directory in one place; when it cannot (HOME unset, no CLAUDE_PLUGIN_DATA) the
+# boundary file is unreadable, and freeze is the DENY tier. An unreadable
+# boundary denies — the alternative is the "no freeze file, allow everything"
+# branch below silently absorbing a machine that simply has no HOME.
+set +e
+STATE_DIR=$(gstack_hook_state_dir "${CLAUDE_PLUGIN_DATA:-}")
+STATE_RC=$?
+set -e
+if [ "$STATE_RC" -ne 0 ]; then
+  gstack_hook_decision deny "[freeze] HOME is unset, so the freeze boundary state could not be read. Blocked (fail closed). Point CLAUDE_PLUGIN_DATA at the gstack state directory, or run /unfreeze."
+  exit 0
+fi
 FREEZE_FILE="$STATE_DIR/freeze-dir.txt"
 
 # If no freeze file exists, allow everything (not yet configured)
@@ -48,9 +59,21 @@ fi
 FREEZE_DIR=$(head -n 1 "$FREEZE_FILE" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 # A literal leading ~ in the state file never matches absolute tool paths
 # (tilde is not expanded from variables) — expand it here.
+# HOME is checked before it is dereferenced: an unset HOME here would abort the
+# script under `set -u` with no verdict on stdout, which Claude Code reads as
+# non-blocking. Reachable when CLAUDE_PLUGIN_DATA supplies the state directory
+# but HOME is still absent.
 case "$FREEZE_DIR" in
-  "~/"*) FREEZE_DIR="$HOME/${FREEZE_DIR#\~/}" ;;
-  "~") FREEZE_DIR="$HOME" ;;
+  "~"|"~/"*)
+    if [ -z "${HOME:-}" ]; then
+      gstack_hook_decision deny "[freeze] The freeze boundary is stored as a ~ path and HOME is unset, so it cannot be resolved. Blocked (fail closed). Re-run /freeze with an absolute path, or run /unfreeze."
+      exit 0
+    fi
+    case "$FREEZE_DIR" in
+      "~/"*) FREEZE_DIR="$HOME/${FREEZE_DIR#\~/}" ;;
+      "~") FREEZE_DIR="$HOME" ;;
+    esac
+    ;;
 esac
 
 # If freeze dir is empty, allow

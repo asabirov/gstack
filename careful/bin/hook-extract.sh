@@ -63,12 +63,53 @@ gstack_hook_decision() {
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":%s}}\n' "$_ghd_decision" "$_ghd_encoded"
 }
 
+# gstack_hook_state_dir [OVERRIDE]
+#   Prints the gstack state directory, or refuses when there isn't one.
+#   OVERRIDE is the caller's own env
+#   override, already expanded and possibly empty: careful reads GSTACK_HOME and
+#   freeze reads CLAUDE_PLUGIN_DATA, and that difference stays with the callers.
+#
+#     rc 0 — the path is authoritative: OVERRIDE, or "$HOME/.gstack".
+#     rc 1 — HOME is unset or empty and no OVERRIDE was given. Nothing is
+#            printed, because there is no directory honest enough to name.
+#
+#   rc 1 means REFUSE, not "use something else". There is deliberately no
+#   computed fallback: the only path always derivable without HOME is a
+#   predictable spot in a world-writable /tmp, which would put the analytics
+#   append behind a symlink any local user can plant. So each caller applies
+#   its own tier's polarity to rc 1 — careful asks, freeze denies — and the
+#   analytics logger simply drops the record. A hook that cannot log must still
+#   be able to deny: logging is what gets dropped, never the verdict.
+#
+#   Resolving HOME lives HERE and nowhere else. These hooks run under
+#   `set -euo pipefail`, where a bare $HOME deref on a machine with HOME unset
+#   aborts the script before any verdict reaches stdout — and Claude Code treats
+#   a PreToolUse hook that exits non-zero and non-2 as non-blocking, so every
+#   deny and every ask became a silent allow. Four separate "$HOME/.gstack"
+#   expressions is how that happened; one function is why it cannot come back.
+gstack_hook_state_dir() {
+  if [ -n "${1:-}" ]; then
+    printf '%s' "$1"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ]; then
+    printf '%s/.gstack' "$HOME"
+    return 0
+  fi
+  return 1
+}
+
 # gstack_hook_log_fire SKILL PATTERN
 #   Append a hook_fire analytics record (pattern name only, never command
 #   content). Respects GSTACK_HOME so tests never pollute the operator's real
 #   analytics file. Best-effort: failures never affect the hook decision.
 gstack_hook_log_fire() {
-  _ghlf_dir="${GSTACK_HOME:-$HOME/.gstack}/analytics"
+  # No state directory (HOME unset and no GSTACK_HOME) means no analytics. The
+  # `|| return 0` is load-bearing: the callers run under `set -e`, and this
+  # logger fires BEFORE the decision is printed on both the deny path and every
+  # ask path, so any non-zero status leaving this function silences the verdict.
+  _ghlf_base=$(gstack_hook_state_dir "${GSTACK_HOME:-}") || return 0
+  _ghlf_dir="$_ghlf_base/analytics"
   mkdir -p "$_ghlf_dir" 2>/dev/null || true
   # Fields are JSON-encoded (a repo basename can carry quotes/backslashes) —
   # same rule this file states for decisions: never raw-interpolate into JSON.

@@ -265,7 +265,19 @@ fi
 # ERE per line; blank lines and #-comments skipped; an invalid regex is
 # skipped (never fatal — the hook must not break on a typo in config).
 if [ -z "$WARN" ]; then
-  _GSTACK_HOME_DIR="${GSTACK_HOME:-$HOME/.gstack}"
+  # The additive rules live under the gstack state directory, which the shared
+  # helper resolves. When it cannot be resolved (HOME unset, no GSTACK_HOME) the
+  # project rules are unreadable, and careful is the ASK tier: its standing rule
+  # for "could not complete the check" is to ask, exactly as it does for a
+  # missing helper and an unparseable payload. The verdict is still printed.
+  set +e
+  _GSTACK_HOME_DIR=$(gstack_hook_state_dir "${GSTACK_HOME:-}")
+  _STATE_RC=$?
+  set -e
+  if [ "$_STATE_RC" -ne 0 ]; then
+    gstack_hook_decision ask "[careful] HOME is unset, so the project pattern rules could not be read - this command was checked against the built-in families only. Approve only if you know what it does."
+    exit 0
+  fi
   _PATTERN_FILES="$_GSTACK_HOME_DIR/careful-patterns.txt"
   # Short-circuit: resolving the project slug costs a subprocess + git call on
   # EVERY Bash command while /careful is active — only pay it when some
