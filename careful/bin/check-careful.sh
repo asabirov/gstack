@@ -58,7 +58,10 @@ fi
 
 # Log a hook fire event (pattern name only, never command content).
 # Shared helper respects GSTACK_HOME, so tests never write real analytics.
-_careful_log_fire() { gstack_hook_log_fire careful "$1"; }
+# `|| true` on purpose: this fires BEFORE the decision is printed on the deny
+# path and on every ask path, so a non-zero status forwarded from the logger
+# would abort the script under `set -e` and leave the verdict unprinted.
+_careful_log_fire() { gstack_hook_log_fire careful "$1" || true; }
 
 # Normalize: lowercase for case-insensitive SQL matching
 CMD_LOWER=$(printf '%s' "$CMD" | tr '[:upper:]' '[:lower:]')
@@ -265,7 +268,19 @@ fi
 # ERE per line; blank lines and #-comments skipped; an invalid regex is
 # skipped (never fatal — the hook must not break on a typo in config).
 if [ -z "$WARN" ]; then
-  _GSTACK_HOME_DIR="${GSTACK_HOME:-$HOME/.gstack}"
+  # The additive rules live under the gstack state directory, which the shared
+  # helper resolves. When it cannot be resolved (HOME unset, no GSTACK_HOME) the
+  # project rules are unreadable, and careful is the ASK tier: its standing rule
+  # for "could not complete the check" is to ask, exactly as it does for a
+  # missing helper and an unparseable payload. The verdict is still printed.
+  set +e
+  _GSTACK_HOME_DIR=$(gstack_hook_state_dir "${GSTACK_HOME:-}")
+  _STATE_RC=$?
+  set -e
+  if [ "$_STATE_RC" -ne 0 ]; then
+    gstack_hook_decision ask "[careful] HOME is unset, so the project pattern rules could not be read - this command was checked against the built-in families only. Approve only if you know what it does."
+    exit 0
+  fi
   _PATTERN_FILES="$_GSTACK_HOME_DIR/careful-patterns.txt"
   # Short-circuit: resolving the project slug costs a subprocess + git call on
   # EVERY Bash command while /careful is active — only pay it when some
@@ -280,6 +295,14 @@ $_GSTACK_HOME_DIR/projects/$SLUG/careful-patterns.txt"
   fi
   while IFS= read -r _PF; do
     [ -f "$_PF" ] || continue
+    # Existence is not readability. `done < "$_PF"` below is a redirection, and
+    # a redirection that fails is fatal under `set -e` — rc=1 with no verdict on
+    # stdout, which Claude Code reads as non-blocking. A root-owned or mode-000
+    # pattern file was enough to reach it, with HOME set and nothing else wrong.
+    if [ ! -r "$_PF" ]; then
+      gstack_hook_decision ask "[careful] A project pattern file exists but cannot be read ($_PF) - this command was checked against the built-in families only. Approve only if you know what it does."
+      exit 0
+    fi
     while IFS= read -r _PAT || [ -n "$_PAT" ]; do
       case "$_PAT" in ''|'#'*) continue ;; esac
       _PAT_RC=0

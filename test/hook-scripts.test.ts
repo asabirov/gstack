@@ -58,6 +58,26 @@ function runHookRaw(scriptPath: string, rawInput: string, env?: Record<string, s
   return { exitCode: result.status ?? 1, output, raw };
 }
 
+// The unset-HOME reproduction needs variables REMOVED from the child environment,
+// which runHook's `{ ...process.env, ...env }` spread cannot express. This is
+// `env -u HOME ...` from the issue's reproduction, in TypeScript.
+function runHookUnset(scriptPath: string, input: object, unset: string[], env?: Record<string, string>): { exitCode: number; output: any; raw: string; stderr: string } {
+  const childEnv: Record<string, string> = { ...(process.env as Record<string, string>), ...env };
+  for (const key of unset) delete childEnv[key];
+  const result = spawnSync('bash', [scriptPath], {
+    input: JSON.stringify(input),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: childEnv,
+    timeout: 5000,
+  });
+  const raw = result.stdout.toString().trim();
+  let output: any = {};
+  try {
+    output = JSON.parse(raw);
+  } catch {}
+  return { exitCode: result.status ?? 1, output, raw, stderr: result.stderr.toString() };
+}
+
 function carefulInput(command: string) {
   return { tool_input: { command } };
 }
@@ -896,6 +916,274 @@ describe('check-freeze.sh', () => {
         });
       } finally {
         fs.rmSync(base, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+// ============================================================
+// Unset HOME — a boundary that cannot find its state still prints a verdict
+// ============================================================
+// Both hooks run under `set -euo pipefail`, where a bare $HOME deref on a
+// machine with HOME unset aborted the script at rc=1 with EMPTY stdout. Claude
+// Code treats a PreToolUse hook that exits non-zero and non-2 as NON-BLOCKING,
+// so every deny and every ask silently became an allow, for every destructive
+// family, with no diagnostic reaching the model. These tests pin the VERDICT,
+// never the exit code alone: rc=0 with no decision is the failure being fixed.
+describe('unset HOME never turns a verdict into an allow', () => {
+  // GSTACK_HOME and CLAUDE_PLUGIN_DATA are removed alongside HOME: each is an
+  // override that would hide the defect, and a test machine may carry either.
+  const NO_STATE = ['HOME', 'GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'];
+
+  describe('check-careful.sh', () => {
+    test('the HIGH deny path still denies', () => {
+      const { exitCode, output, raw } = runHookUnset(CAREFUL_SCRIPT, carefulInput('rm -rf /'), NO_STATE);
+      expect(raw).not.toBe('');
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+    });
+
+    test('an ask family still asks', () => {
+      const { exitCode, output, raw } = runHookUnset(CAREFUL_SCRIPT, carefulInput('git reset --hard'), NO_STATE);
+      expect(raw).not.toBe('');
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('ask');
+      expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('git reset --hard');
+    });
+
+    test('a command matching no family asks, naming the unreadable project rules', () => {
+      // Previously rc=1, empty stdout, from the $HOME deref that located the
+      // additive pattern files. careful is the ASK tier, so an incomplete check
+      // asks — the same polarity it already uses for an unparseable payload.
+      const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('echo hi'), NO_STATE);
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('ask');
+      expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('HOME is unset');
+    });
+
+    test('GSTACK_HOME alone is enough: analytics still land and the verdict is unchanged', () => {
+      // The analytics logger fires BEFORE the decision is printed, so a logger
+      // that cannot resolve its directory is what silenced the verdict. With
+      // the override present there is a directory, and both must happen.
+      const gstackHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-nohome-analytics-'));
+      try {
+        const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('rm -rf /'), ['HOME', 'CLAUDE_PLUGIN_DATA'], { GSTACK_HOME: gstackHome });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        expect(fs.existsSync(path.join(gstackHome, 'analytics', 'skill-usage.jsonl'))).toBe(true);
+      } finally {
+        fs.rmSync(gstackHome, { recursive: true, force: true });
+      }
+    });
+
+    test('no state directory means no analytics, and the verdict still prints', () => {
+      // There is deliberately no computed fallback: the only path derivable
+      // without HOME is a predictable spot in a world-writable /tmp. The record
+      // is dropped instead; a hook that cannot log must still be able to deny.
+      // TMPDIR is pointed at an empty directory the test owns: an earlier draft
+      // of this fix DID fall back to `${TMPDIR:-/tmp}/.gstack` and was observed
+      // creating it. Nothing may appear there now.
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-nohome-tmpdir-'));
+      try {
+        const { exitCode, output, stderr } = runHookUnset(CAREFUL_SCRIPT, carefulInput('rm -rf /'), NO_STATE, { TMPDIR: tmp });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        expect(stderr).not.toContain('unbound variable');
+        expect(fs.readdirSync(tmp)).toEqual([]);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('check-freeze.sh', () => {
+    test('no state directory at all denies (fail closed)', () => {
+      const { exitCode, output, raw } = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), NO_STATE);
+      expect(raw).not.toBe('');
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+      expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('fail closed');
+    });
+
+    test('CLAUDE_PLUGIN_DATA supplies the state directory: the boundary verdict is unchanged', () => {
+      // This is the site in the shared helper, reached through freeze: the
+      // state file resolves, and only the analytics logger needed HOME.
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-freeze-nohome-'));
+      const boundary = path.join(base, 'boundary');
+      fs.mkdirSync(boundary, { recursive: true });
+      try {
+        withFreezeDir(boundary + '/', (stateDir) => {
+          const outside = runHookUnset(FREEZE_SCRIPT, freezeInput(path.join(base, 'elsewhere.ts')), ['HOME', 'GSTACK_HOME'], { CLAUDE_PLUGIN_DATA: stateDir });
+          expect(outside.exitCode).toBe(0);
+          expect(outside.output.hookSpecificOutput?.permissionDecision).toBe('deny');
+          expect(outside.output.hookSpecificOutput?.permissionDecisionReason).toContain('outside the freeze boundary');
+
+          const inside = runHookUnset(FREEZE_SCRIPT, freezeInput(path.join(boundary, 'index.ts')), ['HOME', 'GSTACK_HOME'], { CLAUDE_PLUGIN_DATA: stateDir });
+          expect(inside.exitCode).toBe(0);
+          expect(inside.output.hookSpecificOutput?.permissionDecision).toBeUndefined();
+        });
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    test('a ~ boundary that cannot be expanded denies (fail closed)', () => {
+      // Reachable only when CLAUDE_PLUGIN_DATA supplies the state directory and
+      // HOME is still absent, so the state file reads but its ~ cannot resolve.
+      withFreezeDir('~/boundary', (stateDir) => {
+        const { exitCode, output } = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), ['HOME', 'GSTACK_HOME'], { CLAUDE_PLUGIN_DATA: stateDir });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        // Asserts the ~ BRANCH, not just 'fail closed' — the state-directory
+        // refusal says that too, so if the CLAUDE_PLUGIN_DATA plumbing above
+        // ever broke, a looser assertion would go green without this branch
+        // ever executing.
+        expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('stored as a ~ path');
+      });
+    });
+  });
+
+  describe('an empty HOME is treated as an absent one', () => {
+    // HOME="" is SET, so it never tripped `set -u` and was not part of the
+    // original defect. The old `${GSTACK_HOME:-$HOME/.gstack}` expanded it to
+    // the literal "/.gstack", looked for project rules in a directory nobody
+    // owns, and allowed. An empty HOME is not a home, so the resolver folds it
+    // into "absent" and each tier decides. This is a deliberate difference from
+    // main and is pinned here so it cannot change by accident.
+    test('careful asks', () => {
+      const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('echo hi'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: '' });
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('ask');
+    });
+
+    test('careful still denies what the built-in families catch', () => {
+      const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('rm -rf /'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: '' });
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+    });
+
+    test('freeze denies', () => {
+      const { exitCode, output } = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: '' });
+      expect(exitCode).toBe(0);
+      expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+    });
+  });
+
+  describe('a state file that exists but cannot be read', () => {
+    // Same failure class as the unset HOME, found by review, reachable with a
+    // perfectly normal HOME: existence was checked, readability was not, and
+    // the read that followed was fatal under `set -e` — rc=1, empty stdout.
+    test('freeze denies on an unreadable freeze-dir.txt', () => {
+      withFreezeDir('/tmp/whatever', (stateDir) => {
+        const file = path.join(stateDir, 'freeze-dir.txt');
+        fs.chmodSync(file, 0o000);
+        try {
+          const { exitCode, output, raw } = runHook(FREEZE_SCRIPT, freezeInput('/etc/hosts'), { CLAUDE_PLUGIN_DATA: stateDir });
+          expect(raw).not.toBe('');
+          expect(exitCode).toBe(0);
+          expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+          expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('cannot be read');
+        } finally {
+          fs.chmodSync(file, 0o600);
+        }
+      });
+    });
+
+    test('careful asks on an unreadable careful-patterns.txt', () => {
+      const gstackHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-unreadable-pat-'));
+      const file = path.join(gstackHome, 'careful-patterns.txt');
+      fs.writeFileSync(file, 'terraform\\s+destroy\n');
+      fs.chmodSync(file, 0o000);
+      try {
+        const { exitCode, output, raw } = runHook(CAREFUL_SCRIPT, carefulInput('echo hi'), { GSTACK_HOME: gstackHome });
+        expect(raw).not.toBe('');
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('ask');
+        expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('cannot be read');
+      } finally {
+        fs.chmodSync(file, 0o600);
+        fs.rmSync(gstackHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('control: HOME set behaves exactly as before', () => {
+    test('careful allows a safe command with a real HOME', () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-nohome-control-'));
+      try {
+        const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('echo hi'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: home });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBeUndefined();
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test('careful reads project rules out of $HOME/.gstack when GSTACK_HOME is unset', () => {
+      // The other control test uses an empty HOME, so it only pins "no .gstack
+      // at all". This one pins the $HOME branch of the resolver actually
+      // resolving: the rule has to fire.
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-home-branch-'));
+      try {
+        fs.mkdirSync(path.join(home, '.gstack'), { recursive: true });
+        fs.writeFileSync(path.join(home, '.gstack', 'careful-patterns.txt'), 'terraform\\s+destroy\n');
+        const { exitCode, output } = runHookUnset(CAREFUL_SCRIPT, carefulInput('terraform destroy'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: home });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('ask');
+        expect(output.hookSpecificOutput?.permissionDecisionReason).toContain('Project rule');
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test('a ~ boundary still expands when HOME is set', () => {
+      // The riskiest edit in the fix is the nested `case` around the ~ rewrite,
+      // and nothing covered the branch that matters: a ~ boundary WITH a HOME.
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-tilde-control-'));
+      fs.mkdirSync(path.join(home, 'boundary'), { recursive: true });
+      try {
+        withFreezeDir('~/boundary', (stateDir) => {
+          const env = { HOME: home, CLAUDE_PLUGIN_DATA: stateDir };
+          const inside = runHookUnset(FREEZE_SCRIPT, freezeInput(path.join(home, 'boundary', 'a.ts')), ['GSTACK_HOME'], env);
+          expect(inside.exitCode).toBe(0);
+          expect(inside.output.hookSpecificOutput?.permissionDecision).toBeUndefined();
+
+          const outside = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), ['GSTACK_HOME'], env);
+          expect(outside.exitCode).toBe(0);
+          expect(outside.output.hookSpecificOutput?.permissionDecision).toBe('deny');
+          expect(outside.output.hookSpecificOutput?.permissionDecisionReason).toContain('outside the freeze boundary');
+        });
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test('a bare ~ boundary still expands to HOME itself', () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-tilde-bare-'));
+      try {
+        withFreezeDir('~', (stateDir) => {
+          const env = { HOME: home, CLAUDE_PLUGIN_DATA: stateDir };
+          const inside = runHookUnset(FREEZE_SCRIPT, freezeInput(path.join(home, 'a.ts')), ['GSTACK_HOME'], env);
+          expect(inside.exitCode).toBe(0);
+          expect(inside.output.hookSpecificOutput?.permissionDecision).toBeUndefined();
+
+          const outside = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), ['GSTACK_HOME'], env);
+          expect(outside.exitCode).toBe(0);
+          expect(outside.output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        });
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test('freeze allows when no freeze file exists under a real HOME', () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-nohome-control-freeze-'));
+      try {
+        const { exitCode, output } = runHookUnset(FREEZE_SCRIPT, freezeInput('/etc/hosts'), ['GSTACK_HOME', 'CLAUDE_PLUGIN_DATA'], { HOME: home });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBeUndefined();
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
       }
     });
   });
