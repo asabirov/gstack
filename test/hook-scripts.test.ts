@@ -694,6 +694,111 @@ describe('check-careful.sh', () => {
       });
     });
   });
+
+  // ==========================================================
+  // JEV B1 dated measurement -- DELETE THIS WHOLE BLOCK on or after 2026-10-04,
+  // together with the `_jev_b1` function and calls in check-careful.sh and the
+  // data file it writes.
+  //
+  // These exist because the counter swallows every failure by design, so a
+  // broken one is indistinguishable from a quiet fortnight. A review found the
+  // first version aborted the script outright when HOME was unset; that case is
+  // the last test here.
+  // ==========================================================
+  describe('jev-b1 decision counter (dated measurement, remove 2026-10-04)', () => {
+    function withHome(fn: (gstackHome: string) => void) {
+      const gstackHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-jev-b1-'));
+      try {
+        fn(gstackHome);
+      } finally {
+        fs.rmSync(gstackHome, { recursive: true, force: true });
+      }
+    }
+    const countsIn = (gstackHome: string): any[] => {
+      const file = path.join(gstackHome, 'analytics', 'jev-b1-counts.jsonl');
+      if (!fs.existsSync(file)) return [];
+      return fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    };
+    const realPayload = (command: string) => ({ session_id: 'test-session', tool_input: { command } });
+
+    test('a real invocation records the verdict, the bucket and a UTC hour', () => {
+      withHome((gstackHome) => {
+        const { exitCode, output } = runHook(CAREFUL_SCRIPT, realPayload('rm -rf /'), { GSTACK_HOME: gstackHome });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        const [record, ...rest] = countsIn(gstackHome);
+        expect(rest).toEqual([]);
+        expect(record).toMatchObject({
+          m: 'jev-b1',
+          site: 'careful.verdict',
+          outcome: 'deny',
+          kind: 'label',
+          pattern: 'high_rm_root',
+          n: 1,
+        });
+        // UTC, not local: printf's %()T formats in local time unless TZ says otherwise.
+        expect(record.hour).toBe(`${new Date().toISOString().slice(0, 13)}Z`);
+      });
+    });
+
+    test('the allow path is counted too, because it is the denominator', () => {
+      withHome((gstackHome) => {
+        runHook(CAREFUL_SCRIPT, realPayload('ls -la'), { GSTACK_HOME: gstackHome });
+        expect(countsIn(gstackHome)[0]).toMatchObject({ outcome: 'allow', kind: 'default', pattern: 'no_match' });
+      });
+    });
+
+    test('a payload with no session_id records nothing, which keeps this suite out of the numbers', () => {
+      withHome((gstackHome) => {
+        const { exitCode } = runHook(CAREFUL_SCRIPT, carefulInput('rm -rf /'), { GSTACK_HOME: gstackHome });
+        expect(exitCode).toBe(0);
+        expect(countsIn(gstackHome)).toEqual([]);
+      });
+    });
+
+    test('an unwritable analytics directory loses the count and keeps the verdict', () => {
+      withHome((gstackHome) => {
+        fs.mkdirSync(path.join(gstackHome, 'analytics'), { recursive: true });
+        fs.chmodSync(path.join(gstackHome, 'analytics'), 0o500);
+        const { exitCode, output } = runHook(CAREFUL_SCRIPT, realPayload('rm -rf /'), { GSTACK_HOME: gstackHome });
+        expect(exitCode).toBe(0);
+        expect(output.hookSpecificOutput?.permissionDecision).toBe('deny');
+        fs.chmodSync(path.join(gstackHome, 'analytics'), 0o700);
+      });
+    });
+
+    test('HOME unset on the broken-install path still degrades to an ask', () => {
+      // The regression a review caught. On this path hook-extract.sh was never sourced,
+      // so the counter was the FIRST code in the script to touch $HOME; dereferencing it
+      // under `set -u` exited 1 with no JSON, and Claude Code treats a non-2 exit as a
+      // non-blocking error -- the command would have run UNGATED, on the one path whose
+      // own comment says a partial install must degrade to an ask, never to silence.
+      //
+      // Scoped to the broken-install path on purpose. With hook-extract.sh present and
+      // HOME unset, `gstack_hook_log_fire` aborts the script the same way on clean main;
+      // that is a pre-existing bug in a shared helper, it is reported separately, and
+      // fixing it here would put an unrelated change inside a dated revert.
+      const broken = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-jev-b1-broken-'));
+      try {
+        fs.mkdirSync(path.join(broken, 'bin'), { recursive: true });
+        fs.copyFileSync(CAREFUL_SCRIPT, path.join(broken, 'bin', 'check-careful.sh'));
+        const result = spawnSync('bash', [path.join(broken, 'bin', 'check-careful.sh')], {
+          input: JSON.stringify(realPayload('rm -rf /')),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: Object.fromEntries(
+            Object.entries(process.env).filter(([k]) => k !== 'HOME' && k !== 'GSTACK_HOME'),
+          ) as Record<string, string>,
+          timeout: 5000,
+        });
+        expect(result.status).toBe(0);
+        const decision = JSON.parse(result.stdout.toString().trim()).hookSpecificOutput;
+        expect(decision?.permissionDecision).toBe('ask');
+        expect(decision?.permissionDecisionReason).toContain('Hook helpers unavailable');
+      } finally {
+        fs.rmSync(broken, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 // ============================================================
