@@ -73,13 +73,22 @@ gstack_hook_decision() {
 #     rc 1 — HOME is unset or empty and no OVERRIDE was given. Nothing is
 #            printed, because there is no directory honest enough to name.
 #
-#   rc 1 means REFUSE, not "use something else". There is deliberately no
-#   computed fallback: the only path always derivable without HOME is a
-#   predictable spot in a world-writable /tmp, which would put the analytics
-#   append behind a symlink any local user can plant. So each caller applies
-#   its own tier's polarity to rc 1 — careful asks, freeze denies — and the
-#   analytics logger simply drops the record. A hook that cannot log must still
-#   be able to deny: logging is what gets dropped, never the verdict.
+#   rc 1 means REFUSE, not "use something else". Two fallbacks were weighed and
+#   rejected. A computed scratch path (${TMPDIR:-/tmp}/.gstack) is a predictable
+#   name in a world-writable directory: another local user can pre-plant it as a
+#   symlink and collect the analytics appends. The passwd home that bash's `~`
+#   falls back to is the operator's REAL directory, which is wrong in a different
+#   way — a process whose environment deliberately has no HOME (a container, a
+#   sandbox, this repo's own suite) would start reading and writing the invoking
+#   user's state behind its back, and the suite's "never touch the operator's
+#   ~/.gstack" invariant would go with it.
+#
+#   So the honest answer is to say there is no state directory and let each
+#   caller's tier decide: careful asks, freeze denies, the logger drops the
+#   record. A hook that cannot log must still be able to deny: logging is what
+#   gets dropped, never the verdict. The cost is that on a HOME-less machine
+#   careful asks on every command and freeze denies every write — loud, which is
+#   the point, but see the PR discussion if that trade needs revisiting.
 #
 #   Resolving HOME lives HERE and nowhere else. These hooks run under
 #   `set -euo pipefail`, where a bare $HOME deref on a machine with HOME unset
@@ -119,4 +128,9 @@ gstack_hook_log_fire() {
     "$(gstack_hook_json_string "$2")" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(gstack_hook_json_string "$_ghlf_repo")" >> "$_ghlf_dir/skill-usage.jsonl" 2>/dev/null || true
+  # Explicit, not incidental: this function runs BEFORE the verdict is printed,
+  # so under `set -e` any non-zero status it returns silences the verdict. Every
+  # statement above already ends in `|| true`, and this makes that structural
+  # rather than a property of the last line anyone happens to add.
+  return 0
 }

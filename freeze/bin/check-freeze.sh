@@ -41,7 +41,7 @@ STATE_DIR=$(gstack_hook_state_dir "${CLAUDE_PLUGIN_DATA:-}")
 STATE_RC=$?
 set -e
 if [ "$STATE_RC" -ne 0 ]; then
-  gstack_hook_decision deny "[freeze] HOME is unset, so the freeze boundary state could not be read. Blocked (fail closed). Point CLAUDE_PLUGIN_DATA at the gstack state directory, or run /unfreeze."
+  gstack_hook_decision deny "[freeze] Neither CLAUDE_PLUGIN_DATA nor HOME names a directory, so the freeze boundary state could not be located. Blocked (fail closed). Give this process a HOME, or set CLAUDE_PLUGIN_DATA to the gstack state directory that /freeze wrote to."
   exit 0
 fi
 FREEZE_FILE="$STATE_DIR/freeze-dir.txt"
@@ -56,7 +56,22 @@ fi
 # `tr -d '[:space:]'` deleted INTERNAL spaces too, so a boundary like
 # "~/My Project/src" could never match anything — every edit denied (or the
 # mangled path accidentally allowed the wrong tree).
+# Existence is not readability, and `set -o pipefail` makes the pipeline below
+# non-zero when `head` cannot open the file — which under `set -e` killed the
+# script at rc=1 with no verdict on stdout, the same silent allow this file
+# exists to prevent, reachable with HOME set and a root-owned state file.
+if [ ! -r "$FREEZE_FILE" ]; then
+  gstack_hook_decision deny "[freeze] The freeze boundary file exists but cannot be read ($FREEZE_FILE). Blocked (fail closed). Fix its permissions, or run /unfreeze."
+  exit 0
+fi
+set +e
 FREEZE_DIR=$(head -n 1 "$FREEZE_FILE" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+READ_RC=$?
+set -e
+if [ "$READ_RC" -ne 0 ]; then
+  gstack_hook_decision deny "[freeze] The freeze boundary file could not be read ($FREEZE_FILE). Blocked (fail closed). Reinstall gstack or run /unfreeze."
+  exit 0
+fi
 # A literal leading ~ in the state file never matches absolute tool paths
 # (tilde is not expanded from variables) — expand it here.
 # HOME is checked before it is dereferenced: an unset HOME here would abort the
@@ -147,7 +162,9 @@ case "$FILE_PATH" in
   *)
     # Outside freeze boundary — deny
     # Log hook fire event (shared helper respects GSTACK_HOME)
-    gstack_hook_log_fire freeze boundary_deny
+    # `|| true`: the logger runs BEFORE the deny is printed, so a non-zero status
+    # from it would abort the script under `set -e` and lose the verdict.
+    gstack_hook_log_fire freeze boundary_deny || true
 
     # The reason is JSON-encoded by the shared helper. Never interpolate paths
     # into hand-built JSON: a path containing a quote or newline produced
